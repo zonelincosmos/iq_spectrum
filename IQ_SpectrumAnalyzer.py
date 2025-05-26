@@ -1,0 +1,835 @@
+import sys
+import numpy as np
+from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+                           QAction, QFileDialog, QToolBar, QLabel, QComboBox, QSpinBox,
+                           QPushButton, QStatusBar, QSplitter, QSizePolicy, QSlider, QGroupBox)
+from PyQt5.QtCore import Qt, QRectF
+from PyQt5.QtGui import QIcon, QPalette, QColor
+import matplotlib.pyplot as plt
+from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
+from matplotlib.backends.backend_qt5agg import NavigationToolbar2QT as NavigationToolbar
+from matplotlib.figure import Figure
+from matplotlib.patches import Rectangle
+import matplotlib.patches as patches
+import matplotlib.colors as mcolors
+from matplotlib.colors import LinearSegmentedColormap
+
+
+class IQPlotCanvas(FigureCanvas):
+    """Canvas for plotting IQ waveform data with FFT region highlighting"""
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        # Set dark theme for matplotlib
+        plt.style.use('dark_background')
+        
+        self.fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#1e1e1e')
+        self.axes = self.fig.add_subplot(111, facecolor='#2d2d2d')
+        
+        super().__init__(self.fig)
+        self.setParent(parent)
+        
+        FigureCanvas.setSizePolicy(self,
+                                  QSizePolicy.Expanding,
+                                  QSizePolicy.Expanding)
+        FigureCanvas.updateGeometry(self)
+        
+        # Store reference to the FFT region rectangle
+        self.fft_region_rect = None
+        # Store current axis limits to maintain zoom
+        self.current_xlim = None
+        self.current_ylim = None
+
+
+class FFTPlotCanvas(FigureCanvas):
+    """Canvas for plotting FFT spectrum with high-end dark styling"""
+    def __init__(self, parent=None, width=5, height=4, dpi=100):
+        # Set dark theme for matplotlib
+        plt.style.use('dark_background')
+        
+        self.fig = Figure(figsize=(width, height), dpi=dpi, facecolor='#0a0a0a')
+        self.axes = self.fig.add_subplot(111, facecolor='#111111')
+        
+        super().__init__(self.fig)
+        self.setParent(parent)
+        
+        FigureCanvas.setSizePolicy(self,
+                                  QSizePolicy.Expanding,
+                                  QSizePolicy.Expanding)
+        FigureCanvas.updateGeometry(self)
+        
+        # Store current axis limits to maintain zoom for FFT plot
+        self.current_xlim = None
+        self.current_ylim = None
+        
+        # Setup high-end styling
+        self.setup_dark_theme()
+    
+    def setup_dark_theme(self):
+        """Configure dark theme styling for the FFT plot"""
+        # Set background colors
+        self.fig.patch.set_facecolor('#0a0a0a')
+        self.axes.set_facecolor('#111111')
+        
+        # Configure grid
+        self.axes.grid(True, alpha=0.15, color='#444444', linewidth=0.5, linestyle='-')
+        
+        # Set spine colors
+        for spine in self.axes.spines.values():
+            spine.set_color('#555555')
+            spine.set_linewidth(0.8)
+        
+        # Configure tick colors
+        self.axes.tick_params(colors='#cccccc', which='both', labelsize=9)
+        
+        # Configure label colors
+        self.axes.xaxis.label.set_color('#cccccc')
+        self.axes.yaxis.label.set_color('#cccccc')
+        self.axes.title.set_color('#ffffff')
+
+
+class IQAnalyzer(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        
+        # Program state
+        self.iq_data = None
+        self.sampling_rate = 240.0  # Default sampling rate changed to 240 MHz
+        self.fft_start_sample = 0  # Start sample for FFT (changed from center)
+        self.fft_size = 1024  # Current FFT size
+        self.dragging = False
+        
+        # Setup dark theme for the application
+        self.setup_dark_theme()
+        self.initUI()
+    
+    def setup_dark_theme(self):
+        """Setup dark theme for the entire application"""
+        self.setStyleSheet("""
+            QMainWindow {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QWidget {
+                background-color: #2b2b2b;
+                color: #ffffff;
+            }
+            QGroupBox {
+                font-weight: bold;
+                border: 2px solid #555555;
+                border-radius: 5px;
+                margin-top: 1ex;
+                padding-top: 10px;
+                color: #ffffff;
+                background-color: #3a3a3a;
+            }
+            QGroupBox::title {
+                subcontrol-origin: margin;
+                left: 10px;
+                padding: 0 5px 0 5px;
+                color: #ffffff;
+            }
+            QLabel {
+                color: #ffffff;
+                background-color: transparent;
+            }
+            QComboBox {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 2px;
+                min-width: 80px;
+            }
+            QComboBox::drop-down {
+                border: none;
+            }
+            QComboBox::down-arrow {
+                border: none;
+            }
+            QSpinBox {
+                background-color: #404040;
+                color: #ffffff;
+                border: 1px solid #555555;
+                border-radius: 3px;
+                padding: 2px;
+            }
+            QSlider::groove:horizontal {
+                border: 1px solid #555555;
+                height: 8px;
+                background: #404040;
+                margin: 2px 0;
+                border-radius: 4px;
+            }
+            QSlider::handle:horizontal {
+                background: #0078d4;
+                border: 1px solid #005a9e;
+                width: 18px;
+                margin: -2px 0;
+                border-radius: 9px;
+            }
+            QStatusBar {
+                background-color: #333333;
+                color: #ffffff;
+                border-top: 1px solid #555555;
+            }
+            QMenuBar {
+                background-color: #333333;
+                color: #ffffff;
+                border-bottom: 1px solid #555555;
+            }
+            QMenuBar::item:selected {
+                background-color: #0078d4;
+            }
+            QMenu {
+                background-color: #333333;
+                color: #ffffff;
+                border: 1px solid #555555;
+            }
+            QMenu::item:selected {
+                background-color: #0078d4;
+            }
+        """)
+    
+    def initUI(self):
+        """Initialize the user interface"""
+        self.setWindowTitle('IQ Spectrum Analyzer v1.0 - Professional Edition')
+        self.setGeometry(100, 100, 1400, 900)
+        
+        # Main widget and layout
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        
+        # Create control panel
+        control_panel = self.create_control_panel()
+        main_layout.addWidget(control_panel)
+        
+        # Create splitter for resizable plot areas
+        splitter = QSplitter(Qt.Vertical)
+        
+        # Time domain plot
+        time_widget = QWidget()
+        time_layout = QVBoxLayout(time_widget)
+        
+        time_label = QLabel("Time Domain - IQ Waveform")
+        time_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #ffffff;")
+        time_layout.addWidget(time_label)
+        
+        self.iq_canvas = IQPlotCanvas(time_widget)
+        self.iq_toolbar = NavigationToolbar(self.iq_canvas, time_widget)
+        time_layout.addWidget(self.iq_toolbar)
+        time_layout.addWidget(self.iq_canvas)
+        time_widget.setLayout(time_layout)
+        
+        # FFT plot
+        fft_widget = QWidget()
+        fft_layout = QVBoxLayout(fft_widget)
+        
+        fft_label = QLabel("Frequency Domain - FFT Spectrum")
+        fft_label.setStyleSheet("font-weight: bold; font-size: 12px; color: #ffffff;")
+        fft_layout.addWidget(fft_label)
+        
+        self.fft_canvas = FFTPlotCanvas(fft_widget)
+        self.fft_toolbar = NavigationToolbar(self.fft_canvas, fft_widget)
+        fft_layout.addWidget(self.fft_toolbar)
+        fft_layout.addWidget(self.fft_canvas)
+        fft_widget.setLayout(fft_layout)
+        
+        # Add widgets to splitter
+        splitter.addWidget(time_widget)
+        splitter.addWidget(fft_widget)
+        splitter.setSizes([450, 450])  # Initial sizes
+        
+        main_layout.addWidget(splitter)
+        
+        # Create menu bar
+        self.create_menu_bar()
+        
+        # Status bar
+        self.status_bar = QStatusBar()
+        self.setStatusBar(self.status_bar)
+        self.status_bar.showMessage('Ready - Load IQ data to begin analysis')
+        
+        # Connect mouse events for FFT region selection
+        self.iq_canvas.mpl_connect('button_press_event', self.on_mouse_press)
+        self.iq_canvas.mpl_connect('motion_notify_event', self.on_mouse_move)
+        self.iq_canvas.mpl_connect('button_release_event', self.on_mouse_release)
+        
+        self.show()
+    
+    def create_control_panel(self):
+        """Create the control panel with all settings"""
+        control_group = QGroupBox("Analysis Controls")
+        control_layout = QHBoxLayout()
+        
+        # Sampling rate controls
+        sr_group = QGroupBox("Sampling Rate")
+        sr_layout = QHBoxLayout()
+        sr_layout.addWidget(QLabel("Rate (MHz):"))
+        self.sampling_rate_input = QSpinBox()
+        self.sampling_rate_input.setRange(1, 100000)
+        self.sampling_rate_input.setValue(240)  # Default changed to 240 MHz
+        self.sampling_rate_input.setSuffix(" MHz")
+        # Sampling rate only affects FFT plot now
+        self.sampling_rate_input.valueChanged.connect(self.update_fft) 
+        sr_layout.addWidget(self.sampling_rate_input)
+        sr_group.setLayout(sr_layout)
+        
+        # FFT size controls
+        fft_group = QGroupBox("FFT Settings")
+        fft_layout = QVBoxLayout()
+        
+        fft_size_layout = QHBoxLayout()
+        fft_size_layout.addWidget(QLabel("FFT Size:"))
+        self.fft_size_combo = QComboBox()
+        fft_sizes = ["64", "128", "256", "512", "1024", "2048", "4096", "8192", "16384"]
+        self.fft_size_combo.addItems(fft_sizes)
+        self.fft_size_combo.setCurrentIndex(4)  # Default to 1024
+        self.fft_size_combo.currentIndexChanged.connect(self.update_fft_size)
+        fft_size_layout.addWidget(self.fft_size_combo)
+        
+        # Window function
+        window_layout = QHBoxLayout()
+        window_layout.addWidget(QLabel("Window:"))
+        self.window_combo = QComboBox()
+        window_types = ["Rectangle", "Hamming", "Hanning", "Blackman", "Bartlett"]
+        self.window_combo.addItems(window_types)
+        self.window_combo.setCurrentIndex(1)  # Default to Hamming
+        self.window_combo.currentIndexChanged.connect(self.update_fft)
+        window_layout.addWidget(self.window_combo)
+        
+        fft_layout.addLayout(fft_size_layout)
+        fft_layout.addLayout(window_layout)
+        fft_group.setLayout(fft_layout)
+        
+        # FFT position controls
+        pos_group = QGroupBox("FFT Region")
+        pos_layout = QVBoxLayout()
+        
+        pos_info_layout = QHBoxLayout()
+        self.position_label = QLabel("Start Sample: 0")
+        pos_info_layout.addWidget(self.position_label)
+        
+        self.position_slider = QSlider(Qt.Horizontal)
+        self.position_slider.setMinimum(0)
+        self.position_slider.setMaximum(1000)
+        self.position_slider.setValue(0)
+        self.position_slider.setEnabled(False)
+        self.position_slider.valueChanged.connect(self.update_fft_position)
+        
+        pos_layout.addLayout(pos_info_layout)
+        pos_layout.addWidget(self.position_slider)
+        pos_group.setLayout(pos_layout)
+        
+        # Add all groups to control panel
+        control_layout.addWidget(sr_group)
+        control_layout.addWidget(fft_group)
+        control_layout.addWidget(pos_group)
+        control_layout.addStretch()
+        
+        control_group.setLayout(control_layout)
+        return control_group
+    
+    def create_menu_bar(self):
+        """Create menu bar"""
+        menubar = self.menuBar()
+        
+        # File menu
+        file_menu = menubar.addMenu('File')
+        
+        open_action = QAction('Open IQ Data...', self)
+        open_action.setShortcut('Ctrl+O')
+        open_action.triggered.connect(self.open_file)
+        file_menu.addAction(open_action)
+        
+        file_menu.addSeparator()
+        
+        save_image_action = QAction('Save Plots as Image...', self)
+        save_image_action.setShortcut('Ctrl+S')
+        save_image_action.triggered.connect(self.save_image)
+        file_menu.addAction(save_image_action)
+        
+        file_menu.addSeparator()
+        
+        exit_action = QAction('Exit', self)
+        exit_action.setShortcut('Ctrl+Q')
+        exit_action.triggered.connect(self.close)
+        file_menu.addAction(exit_action)
+        
+        # Help menu
+        help_menu = menubar.addMenu('Help')
+        
+        about_action = QAction('About', self)
+        about_action.triggered.connect(self.show_about)
+        help_menu.addAction(about_action)
+    
+    def show_about(self):
+        """Show about dialog"""
+        from PyQt5.QtWidgets import QMessageBox
+        QMessageBox.about(self, "About IQ Spectrum Analyzer", 
+                         "IQ Spectrum Analyzer v1.0 - Professional Edition\n\n"
+                         "A tool for analyzing IQ waveform data in time and frequency domains.\n\n"
+                         "Features:\n"
+                         "• Load IQ data from various file formats\n"
+                         "• Interactive FFT region selection\n"
+                         "• Multiple window functions\n"
+                         "• Real-time spectrum analysis\n"
+                         "• Professional dark theme interface\n\n"
+                         "Usage:\n"
+                         "• Click on time domain plot to set FFT start position\n"
+                         "• Zoom is preserved when selecting FFT regions")
+    
+    def store_current_zoom(self):
+        """Store current axis limits to preserve zoom level"""
+        # Check if axes exist and have valid limits
+        if self.iq_canvas.axes.lines: # Check if any lines have been plotted
+            self.iq_canvas.current_xlim = self.iq_canvas.axes.get_xlim()
+            self.iq_canvas.current_ylim = self.iq_canvas.axes.get_ylim()
+        else:
+            self.iq_canvas.current_xlim = None
+            self.iq_canvas.current_ylim = None
+    
+    def restore_zoom(self):
+        """Restore previously stored zoom level"""
+        if self.iq_canvas.current_xlim is not None and self.iq_canvas.current_ylim is not None:
+            self.iq_canvas.axes.set_xlim(self.iq_canvas.current_xlim)
+            self.iq_canvas.axes.set_ylim(self.iq_canvas.current_ylim)
+    
+    def store_fft_zoom(self):
+        """Store current FFT axis limits to preserve zoom level"""
+        # Check if FFT axes exist and have valid limits
+        if self.fft_canvas.axes.lines: # Check if any lines have been plotted
+            self.fft_canvas.current_xlim = self.fft_canvas.axes.get_xlim()
+            self.fft_canvas.current_ylim = self.fft_canvas.axes.get_ylim()
+        else:
+            self.fft_canvas.current_xlim = None
+            self.fft_canvas.current_ylim = None
+    
+    def restore_fft_zoom(self):
+        """Restore previously stored FFT zoom level"""
+        if self.fft_canvas.current_xlim is not None and self.fft_canvas.current_ylim is not None:
+            self.fft_canvas.axes.set_xlim(self.fft_canvas.current_xlim)
+            self.fft_canvas.axes.set_ylim(self.fft_canvas.current_ylim)
+    
+    def open_file(self):
+        """Open and load IQ data file"""
+        from PyQt5.QtWidgets import QMessageBox
+        
+        options = QFileDialog.Options()
+        filename, _ = QFileDialog.getOpenFileName(
+            self, "Open IQ Data File", "", 
+            "Text Files (*.txt);;All Supported (*.txt *.bin *.csv *.npy);;Binary Files (*.bin);;CSV Files (*.csv);;NPY Files (*.npy);;All Files (*)", 
+            options=options
+        )
+        
+        if filename:
+            try:
+                # Try to determine file type and load accordingly
+                if filename.endswith('.npy'):
+                    self.iq_data = np.load(filename)
+                elif filename.endswith('.csv'):
+                    data = np.genfromtxt(filename, delimiter=',')
+                    # Assume complex data with I,Q columns
+                    if len(data.shape) > 1 and data.shape[1] >= 2:
+                        self.iq_data = data[:, 0] + 1j * data[:, 1]
+                    else:
+                        self.status_bar.showMessage('CSV file must have at least 2 columns (I and Q)')
+                        return
+                elif filename.endswith('.bin'):
+                    # Assume binary file with interleaved I,Q float32 values
+                    data = np.fromfile(filename, dtype=np.float32)
+                    if len(data) % 2 == 0:
+                        self.iq_data = data[::2] + 1j * data[1::2]
+                    else:
+                        self.status_bar.showMessage('Binary file must have even number of values for I/Q pairs')
+                        return
+                elif filename.endswith('.txt'):
+                    # Handle .txt files - assume space or tab delimited with I,Q columns
+                    data = np.loadtxt(filename)
+                    if len(data.shape) > 1 and data.shape[1] >= 2:
+                        self.iq_data = data[:, 0] + 1j * data[:, 1]
+                    else:
+                        self.status_bar.showMessage('Text file must have at least 2 columns (I and Q)')
+                        return
+                else:
+                    # Try to guess format for other extensions
+                    try:
+                        data = np.loadtxt(filename)
+                        if len(data.shape) > 1 and data.shape[1] >= 2:
+                            self.iq_data = data[:, 0] + 1j * data[:, 1]
+                        else:
+                            self.status_bar.showMessage('File must have at least 2 columns (I and Q)')
+                            return
+                    except:
+                        self.status_bar.showMessage('Unsupported file format')
+                        return
+                
+                # Validate data
+                if len(self.iq_data) < 64:
+                    QMessageBox.warning(self, "Warning", "Data file contains less than 64 samples. Analysis may be limited.")
+                
+                # Initialize FFT parameters
+                self.fft_start_sample = 0  # Start from beginning
+                self.fft_size = int(self.fft_size_combo.currentText())
+                
+                # Update position slider
+                self.position_slider.setEnabled(True)
+                # Ensure maximum is at least 0 to prevent errors with very small data
+                self.position_slider.setMaximum(max(0, len(self.iq_data) - self.fft_size))
+                self.position_slider.setValue(self.fft_start_sample)
+                
+                # Reset zoom state for both plots
+                self.iq_canvas.current_xlim = None
+                self.iq_canvas.current_ylim = None
+                self.fft_canvas.current_xlim = None
+                self.fft_canvas.current_ylim = None
+                
+                self.plot_iq_data()
+                self.update_fft()
+                
+                self.status_bar.showMessage(f'Loaded {len(self.iq_data)} IQ samples from {filename}')
+            
+            except Exception as e:
+                QMessageBox.critical(self, "Error", f'Error loading file: {str(e)}')
+                self.status_bar.showMessage(f'Error loading file: {str(e)}')
+    
+    def plot_iq_data(self):
+        """Plot the IQ data in time domain with FFT region highlighting"""
+        if self.iq_data is None:
+            return
+        
+        # Store current zoom level before clearing
+        self.store_current_zoom()
+        
+        self.iq_canvas.axes.clear()
+        
+        # Create sample axis (no longer time_axis)
+        sample_axis = np.arange(len(self.iq_data))
+        
+        # Plot I and Q components with enhanced styling
+        self.iq_canvas.axes.plot(sample_axis, np.real(self.iq_data), label='I', 
+                                linewidth=1.2, color='#00bfff', alpha=0.8)
+        self.iq_canvas.axes.plot(sample_axis, np.imag(self.iq_data), label='Q', 
+                                linewidth=1.2, color='#ff6b6b', alpha=0.8)
+        
+        # Set labels and legend with dark theme styling
+        self.iq_canvas.axes.set_xlabel('Sample Number', color='#cccccc', fontsize=11)
+        self.iq_canvas.axes.set_ylabel('Amplitude', color='#cccccc', fontsize=11)
+        self.iq_canvas.axes.set_title('IQ Waveform (Cyan bar shows FFT analysis region)', 
+                                     color='#ffffff', fontsize=12, fontweight='bold')
+        
+        # Configure legend with dark theme
+        legend = self.iq_canvas.axes.legend(loc='upper right', framealpha=0.8)
+        legend.get_frame().set_facecolor('#333333')
+        legend.get_frame().set_edgecolor('#555555')
+        for text in legend.get_texts():
+            text.set_color('#ffffff')
+        
+        # Configure grid
+        self.iq_canvas.axes.grid(True, alpha=0.2, color='#555555', linewidth=0.5)
+        
+        # Configure spines and ticks
+        for spine in self.iq_canvas.axes.spines.values():
+            spine.set_color('#555555')
+        self.iq_canvas.axes.tick_params(colors='#cccccc')
+        
+        # Let matplotlib autoscale first, then add highlighting
+        self.iq_canvas.axes.autoscale_view()
+        
+        # Add FFT region highlighting AFTER autoscaling
+        self.highlight_fft_region()
+        
+        # Restore zoom level if it existed
+        self.restore_zoom()
+        
+        self.iq_canvas.draw()
+    
+    def highlight_fft_region(self):
+        """Add a colored rectangle to highlight the FFT analysis region"""
+        if self.iq_data is None:
+            return
+        
+        # Remove any existing rectangle and annotations to prevent duplicates
+        if self.iq_canvas.fft_region_rect:
+            self.iq_canvas.fft_region_rect.remove()
+            self.iq_canvas.fft_region_rect = None
+        for ann in self.iq_canvas.axes.texts:
+            ann.remove()
+        
+        # Calculate FFT region boundaries using sample indices
+        start_sample = self.fft_start_sample
+        end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+        
+        # Get current y-axis limits (after data has been plotted and autoscaled)
+        y_min, y_max = self.iq_canvas.axes.get_ylim()
+        
+        # Add semi-transparent rectangle with enhanced styling
+        rect = Rectangle((start_sample, y_min), end_sample - start_sample, y_max - y_min,
+                        facecolor='#00ffff', alpha=0.15, edgecolor='#00bfff', linewidth=2.0)
+        self.iq_canvas.axes.add_patch(rect)
+        
+        # Store reference for mouse interaction
+        self.iq_canvas.fft_region_rect = rect
+        
+        # Add text annotation with dark theme styling
+        mid_sample = (start_sample + end_sample) / 2
+        text_y = y_min + 0.85 * (y_max - y_min)
+        '''
+        self.iq_canvas.axes.annotate(f'FFT Region\n{end_sample - start_sample} samples\nStart: {start_sample}', 
+                                   xy=(mid_sample, text_y), 
+                                   ha='center', va='center',
+                                   bbox=dict(boxstyle="round,pad=0.4", facecolor='#333333', 
+                                           alpha=0.9, edgecolor='#00bfff', linewidth=1.5),
+                                   color='#ffffff', fontsize=9, fontweight='bold')
+        '''
+    def on_mouse_press(self, event):
+        """Handle mouse press for FFT region selection"""
+        if event.inaxes != self.iq_canvas.axes or self.iq_data is None:
+            return
+        
+        if event.button == 1:  # Left mouse button
+            self.dragging = True
+            # Convert click position to sample index (xdata is already sample number)
+            sample_clicked = int(event.xdata)
+            
+            # Update FFT start position (ensure it doesn't exceed valid range)
+            self.fft_start_sample = np.clip(sample_clicked, 0, 
+                                          max(0, len(self.iq_data) - self.fft_size))
+            
+            self.update_position_controls()
+            # No plot/FFT update here, as on_mouse_move or on_mouse_release will handle it
+    
+    def on_mouse_move(self, event):
+        """Handle mouse move for dragging FFT region"""
+        if not self.dragging or event.inaxes != self.iq_canvas.axes or self.iq_data is None:
+            return
+        
+        # Convert mouse position to sample index (xdata is already sample number)
+        sample_pos = int(event.xdata)
+        
+        # Update FFT start position (ensure it doesn't exceed valid range)
+        new_fft_start_sample = np.clip(sample_pos, 0, 
+                                      max(0, len(self.iq_data) - self.fft_size))
+        
+        if new_fft_start_sample != self.fft_start_sample:
+            self.fft_start_sample = new_fft_start_sample
+            self.update_position_controls()
+            self.plot_iq_data() # Redraw IQ plot to update highlight
+            self.update_fft()   # Update FFT as region changed
+    
+    def on_mouse_release(self, event):
+        """Handle mouse release"""
+        self.dragging = False
+        # Ensure plot and FFT are updated one last time after release
+        self.plot_iq_data()
+        self.update_fft()
+    
+    def update_position_controls(self):
+        """Update position slider and label"""
+        # Ensure slider max is correctly set based on current data length and FFT size
+        if self.iq_data is not None:
+            self.position_slider.setMaximum(max(0, len(self.iq_data) - self.fft_size))
+        else:
+            self.position_slider.setMaximum(0) # No data, slider max is 0
+
+        self.position_slider.setValue(self.fft_start_sample)
+        self.position_label.setText(f"Start Sample: {self.fft_start_sample}")
+    
+    def update_fft_position(self):
+        """Update FFT position from slider"""
+        if self.iq_data is None:
+            return
+        
+        new_fft_start_sample = self.position_slider.value()
+        new_fft_start_sample = np.clip(new_fft_start_sample, 0, 
+                                      max(0, len(self.iq_data) - self.fft_size))
+        
+        if new_fft_start_sample != self.fft_start_sample:
+            self.fft_start_sample = new_fft_start_sample
+            self.position_label.setText(f"Start Sample: {self.fft_start_sample}")
+            self.plot_iq_data()
+            self.update_fft()
+    
+    def update_sampling_rate(self):
+        """Update sampling rate and refresh plots"""
+        # Removed plot_iq_data here as it no longer depends on sampling_rate
+        self.sampling_rate = self.sampling_rate_input.value()
+        if self.iq_data is not None:
+            self.update_fft() # Only FFT needs to be updated
+    
+    def update_fft_size(self):
+        """Update FFT size and refresh analysis"""
+        self.fft_size = int(self.fft_size_combo.currentText())
+        
+        if self.iq_data is not None:
+            # Update position slider range
+            self.position_slider.setMaximum(max(0, len(self.iq_data) - self.fft_size))
+            
+            # Ensure FFT start is within valid range
+            self.fft_start_sample = np.clip(self.fft_start_sample, 0, 
+                                          max(0, len(self.iq_data) - self.fft_size))
+            
+            self.update_position_controls()
+            self.plot_iq_data() # Redraw IQ plot to update highlight with new FFT size
+            self.update_fft()
+    
+    def update_fft(self):
+        """Update the FFT plot based on the selected region"""
+        if self.iq_data is None:
+            return
+
+        # Store current FFT zoom level before clearing
+        self.store_fft_zoom()
+
+        # Update self.sampling_rate from the input spinbox
+        self.sampling_rate = self.sampling_rate_input.value()
+
+        # Get window function
+        window_type = self.window_combo.currentText().lower()
+
+        # Calculate FFT region (using start sample)
+        start_sample = self.fft_start_sample
+        end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+
+        # Extract data segment for FFT
+        data_segment = self.iq_data[start_sample:end_sample]
+
+        # Apply window function
+        if window_type == 'rectangle':
+            windowed_data = data_segment
+        elif window_type == 'hamming':
+            windowed_data = data_segment * np.hamming(len(data_segment))
+        elif window_type == 'hanning':
+            windowed_data = data_segment * np.hanning(len(data_segment))
+        elif window_type == 'blackman':
+            windowed_data = data_segment * np.blackman(len(data_segment))
+        elif window_type == 'bartlett':
+            windowed_data = data_segment * np.bartlett(len(data_segment))
+        else:
+            windowed_data = data_segment
+
+        # Zero-padding if necessary
+        if len(windowed_data) < self.fft_size:
+            padded_data = np.zeros(self.fft_size, dtype=complex)
+            padded_data[:len(windowed_data)] = windowed_data
+            windowed_data = padded_data
+
+        # Perform FFT and shift
+        fft_result = np.fft.fftshift(np.fft.fft(windowed_data, self.fft_size))
+        fft_mag = 20 * np.log10(np.abs(fft_result) + 1e-12)  # dB scale
+
+        # Calculate frequency axis using the now updated self.sampling_rate
+        freq_axis = np.fft.fftshift(np.fft.fftfreq(self.fft_size, 1/(self.sampling_rate * 1e6)))
+
+        # Update FFT plot
+        self.fft_canvas.axes.clear()
+
+        # Format frequency axis for better readability
+        # This part will now correctly use the scaled freq_axis
+        if max(abs(freq_axis)) > 1e6:
+            self.fft_canvas.axes.plot(freq_axis / 1e6, fft_mag, linewidth=1)
+            self.fft_canvas.axes.set_xlabel('Frequency (MHz)')
+        elif max(abs(freq_axis)) > 1e3:
+            self.fft_canvas.axes.plot(freq_axis / 1e3, fft_mag, linewidth=1)
+            self.fft_canvas.axes.set_xlabel('Frequency (kHz)')
+        else:
+            self.fft_canvas.axes.plot(freq_axis, fft_mag, linewidth=1)
+            self.fft_canvas.axes.set_xlabel('Frequency (Hz)')
+
+        self.fft_canvas.axes.set_ylabel('Magnitude (dB)')
+        self.fft_canvas.axes.set_title(f'FFT Spectrum ({window_type.title()} Window)')
+        self.fft_canvas.axes.grid(True, alpha=0.3)
+
+        # Restore FFT zoom level if it existed
+        self.restore_fft_zoom()
+
+        self.fft_canvas.draw()
+
+        # Update status bar with FFT details
+        freq_resolution = self.sampling_rate * 1e6 / self.fft_size
+        self.status_bar.showMessage(
+            f'FFT: samples {start_sample}-{end_sample} ({end_sample-start_sample} samples), '
+            f'{self.fft_size} FFT points, Resolution: {freq_resolution:.2f} Hz')
+    
+    def save_image(self):
+        """Save both plots as a single image"""
+        if self.iq_data is None:
+            from PyQt5.QtWidgets import QMessageBox
+            QMessageBox.information(self, "Info", "No data to save. Please load IQ data first.")
+            return
+        
+        options = QFileDialog.Options()
+        filename, _ = QFileDialog.getSaveFileName(
+            self, "Save Plots as Image", "", 
+            "PNG Files (*.png);;PDF Files (*.pdf);;SVG Files (*.svg);;All Files (*)",
+            options=options
+        )
+        
+        if filename:
+            try:
+                # Create a new figure with both plots
+                fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 10))
+                
+                # Copy IQ plot (sample-based x-axis)
+                sample_axis = np.arange(len(self.iq_data))
+                ax1.plot(sample_axis, np.real(self.iq_data), label='I', linewidth=0.8, color='blue')
+                ax1.plot(sample_axis, np.imag(self.iq_data), label='Q', linewidth=0.8, color='red')
+                
+                # Add FFT region highlight to saved image (sample-based)
+                start_sample = self.fft_start_sample
+                end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+                
+                # Let matplotlib autoscale first
+                ax1.autoscale_view()
+                y_min, y_max = ax1.get_ylim()
+                rect = Rectangle((start_sample, y_min), end_sample - start_sample, y_max - y_min,
+                               facecolor='cyan', alpha=0.2, edgecolor='blue', linewidth=1.5)
+                ax1.add_patch(rect)
+                
+                # Add annotation for saved image
+                mid_sample = (start_sample + end_sample) / 2
+                text_y = y_min + 0.85 * (y_max - y_min)
+                ax1.annotate(f'FFT Region\n{end_sample - start_sample} samples\nStart: {start_sample}', 
+                             xy=(mid_sample, text_y), 
+                             ha='center', va='center',
+                             bbox=dict(boxstyle="round,pad=0.3", facecolor='white', alpha=0.8, edgecolor='blue'))
+
+                ax1.set_xlabel('Sample Number') # Changed to Sample Number
+                ax1.set_ylabel('Amplitude')
+                ax1.set_title('IQ Waveform (Blue bar shows FFT analysis region)')
+                ax1.legend()
+                ax1.grid(True, alpha=0.3)
+                
+                # Copy FFT plot
+                for line in self.fft_canvas.axes.lines:
+                    ax2.plot(line.get_xdata(), line.get_ydata(), linewidth=1)
+                ax2.set_xlabel(self.fft_canvas.axes.get_xlabel())
+                ax2.set_ylabel(self.fft_canvas.axes.get_ylabel())
+                ax2.set_title(self.fft_canvas.axes.get_title())
+                ax2.grid(True, alpha=0.3)
+                
+                fig.tight_layout()
+                fig.savefig(filename, dpi=300, bbox_inches='tight')
+                plt.close(fig)
+                
+                self.status_bar.showMessage(f'Saved plots to {filename}')
+            
+            except Exception as e:
+                from PyQt5.QtWidgets import QMessageBox
+                QMessageBox.critical(self, "Error", f'Error saving image: {str(e)}')
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("IQ Spectrum Analyzer")
+    app.setApplicationVersion("1.0")
+    
+    analyzer = IQAnalyzer()
+    
+    try:
+        sys.exit(app.exec_())
+    except SystemExit:
+        pass
+
+
+if __name__ == '__main__':
+    main()
