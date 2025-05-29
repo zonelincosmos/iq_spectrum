@@ -101,14 +101,21 @@ class FFTPlotCanvas(FigureCanvas):
             # Fast update: only change data, don't recreate plot
             self.fft_line.set_data(freq_data, mag_data)
             
-            # Update y-axis limits only if needed
-            max_magnitude = np.max(mag_data)
-            current_ylim = self.axes.get_ylim()
-            new_ylim = (max_magnitude - 80, max_magnitude + 20)
-            
-            # Only update y-limits if there's a significant change (reduces redraws)
-            if abs(current_ylim[0] - new_ylim[0]) > 5 or abs(current_ylim[1] - new_ylim[1]) > 5:
-                self.axes.set_ylim(new_ylim)
+            # Only auto-adjust y-axis if user hasn't manually zoomed
+            # Check if current zoom state represents manual zoom vs auto-scaling
+            if self.current_ylim is None:
+                # No stored zoom state - this means auto-scaling is appropriate
+                max_magnitude = np.max(mag_data)
+                current_ylim = self.axes.get_ylim()
+                new_ylim = (max_magnitude - 70, max_magnitude + 20)
+                
+                # Only update y-limits if there's a significant change (reduces redraws)
+                if abs(current_ylim[0] - new_ylim[0]) > 5 or abs(current_ylim[1] - new_ylim[1]) > 5:
+                    self.axes.set_ylim(new_ylim)
+            else:
+                # User has manually zoomed - preserve their zoom level
+                # Don't auto-adjust the y-axis, keep the user's manual zoom
+                pass
             
             # Use fast drawing method
             self.draw_idle()
@@ -134,7 +141,7 @@ class FFTPlotCanvas(FigureCanvas):
         
         # Set y-axis limits
         max_magnitude = np.max(mag_data)
-        self.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 20)
+        self.axes.set_ylim(bottom=max_magnitude - 70, top=max_magnitude + 20)
         
         # Add fine grids (both major and minor)
         self.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
@@ -282,7 +289,7 @@ class IQAnalyzer(QMainWindow):
     
     def initUI(self):
         """Initialize the user interface"""
-        self.setWindowTitle('IQ Spectrum Analyzer v1.2 - Ultra Performance Edition')
+        self.setWindowTitle('IQ Spectrum Analyzer')
         self.setGeometry(100, 100, 1400, 900)
         
         # Main widget and layout
@@ -491,11 +498,9 @@ class IQAnalyzer(QMainWindow):
         """Show about dialog"""
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.about(self, "About IQ Spectrum Analyzer", 
-                         "IQ Spectrum Analyzer v1.2 - Ultra Performance Edition\n\n"
+                         "IQ Spectrum Analyzer v1.3\n\n"
                          "A high-performance tool for analyzing IQ waveform data.\n\n"
                          "Performance Optimizations:\n"
-                         "• 16ms FFT update timer (~60 FPS)\n"
-                         "• Smart FFT data caching\n"
                          "• Fast line plot updates without full redraw\n"
                          "• Optimized rectangle highlighting\n"
                          "• Efficient zoom preservation\n\n"
