@@ -63,8 +63,8 @@ class FFTPlotCanvas(FigureCanvas):
         self.current_xlim = None
         self.current_ylim = None
         
-        # Track whether user has manually zoomed
-        self.user_has_zoomed = False
+        # Store fixed y-axis limits when y-axis is locked
+        self.fixed_ylim = None
         
         # Performance optimization: store plot line for fast updates
         self.fft_line = None
@@ -72,25 +72,6 @@ class FFTPlotCanvas(FigureCanvas):
         
         # Setup high-end styling
         self.setup_dark_theme()
-        
-        # Connect to zoom/pan events
-        self.mpl_connect('button_release_event', self.on_zoom_pan_event)
-    
-    def on_zoom_pan_event(self, event):
-        """Detect when user has manually zoomed or panned"""
-        if event.inaxes == self.axes:
-            # Check if the current view limits differ from the auto-scaled limits
-            # This indicates the user has zoomed/panned
-            if self.fft_line is not None and len(self.fft_line.get_ydata()) > 0:
-                data = self.fft_line.get_ydata()
-                max_magnitude = np.max(data)
-                auto_ylim = (max_magnitude - 80, max_magnitude + 10)
-                current_ylim = self.axes.get_ylim()
-                
-                # If current limits differ significantly from auto limits, user has zoomed
-                if (abs(current_ylim[0] - auto_ylim[0]) > 1 or 
-                    abs(current_ylim[1] - auto_ylim[1]) > 1):
-                    self.user_has_zoomed = True
     
     def setup_dark_theme(self):
         """Configure dark theme styling for the FFT plot"""
@@ -114,31 +95,32 @@ class FFTPlotCanvas(FigureCanvas):
         self.axes.yaxis.label.set_color('#cccccc')
         self.axes.title.set_color('#ffffff')
     
-    def update_fft_data_fast(self, freq_data, mag_data, window_type):
+    def update_fft_data_fast(self, freq_data, mag_data, window_type, fix_y_axis=False):
         """Fast FFT plot update using existing line object"""
         if self.fft_line is None or not self.plot_initialized:
             # Initialize plot on first call
-            self.initialize_fft_plot(freq_data, mag_data, window_type)
+            self.initialize_fft_plot(freq_data, mag_data, window_type, fix_y_axis)
         else:
             # Fast update: only change data, don't recreate plot
             self.fft_line.set_data(freq_data, mag_data)
             
-            # Only auto-adjust y-axis if user hasn't manually zoomed
-            if not self.user_has_zoomed:
-                # Auto-scaling is appropriate
+            if fix_y_axis and self.fixed_ylim is not None:
+                # Use fixed y-axis limits
+                self.axes.set_ylim(self.fixed_ylim)
+            elif not fix_y_axis:
+                # Auto-scale y-axis
                 max_magnitude = np.max(mag_data)
-                current_ylim = self.axes.get_ylim()
                 new_ylim = (max_magnitude - 80, max_magnitude + 10)
                 
                 # Only update y-limits if there's a significant change (reduces redraws)
+                current_ylim = self.axes.get_ylim()
                 if abs(current_ylim[0] - new_ylim[0]) > 5 or abs(current_ylim[1] - new_ylim[1]) > 5:
                     self.axes.set_ylim(new_ylim)
-            # else: User has manually zoomed - preserve their zoom level
             
             # Use fast drawing method
             self.draw_idle()
     
-    def initialize_fft_plot(self, freq_data, mag_data, window_type):
+    def initialize_fft_plot(self, freq_data, mag_data, window_type, fix_y_axis=False):
         """Initialize the FFT plot with proper styling"""
         self.axes.clear()
         
@@ -158,27 +140,39 @@ class FFTPlotCanvas(FigureCanvas):
                            color='#ffffff', fontsize=12, fontweight='bold')
         
         # Set y-axis limits
-        max_magnitude = np.max(mag_data)
-        self.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 10)
+        if fix_y_axis and self.fixed_ylim is not None:
+            # Use fixed y-axis limits
+            self.axes.set_ylim(self.fixed_ylim)
+        else:
+            # Auto-scale y-axis
+            max_magnitude = np.max(mag_data)
+            self.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 10)
         
         # Add fine grids (both major and minor)
         self.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
         self.axes.grid(True, which='minor', alpha=0.2, color='#444444', linewidth=0.4)
         self.axes.minorticks_on()
         
-        # Restore zoom if it exists and user has zoomed
-        if self.user_has_zoomed and self.current_xlim is not None and self.current_ylim is not None:
+        # Restore x-axis zoom if it exists
+        if self.current_xlim is not None:
             self.axes.set_xlim(self.current_xlim)
-            self.axes.set_ylim(self.current_ylim)
         
         self.plot_initialized = True
         self.draw()
     
+    def lock_y_axis(self):
+        """Lock the current y-axis limits"""
+        self.fixed_ylim = self.axes.get_ylim()
+    
+    def unlock_y_axis(self):
+        """Unlock the y-axis to allow auto-scaling"""
+        self.fixed_ylim = None
+    
     def reset_zoom_state(self):
         """Reset the zoom state (called when home button is pressed or data is loaded)"""
-        self.user_has_zoomed = False
         self.current_xlim = None
         self.current_ylim = None
+        self.fixed_ylim = None
 
 
 class IQAnalyzer(QMainWindow):
@@ -441,8 +435,16 @@ class IQAnalyzer(QMainWindow):
         self.window_combo.currentIndexChanged.connect(self.invalidate_fft_cache)
         window_layout.addWidget(self.window_combo)
         
+        # Y-axis lock checkbox
+        y_axis_layout = QHBoxLayout()
+        self.fix_y_axis_checkbox = QCheckBox("Fix Y-Axis Scale")
+        self.fix_y_axis_checkbox.setToolTip("Lock the current FFT Y-axis scale to prevent auto-scaling")
+        self.fix_y_axis_checkbox.stateChanged.connect(self.toggle_y_axis_lock)
+        y_axis_layout.addWidget(self.fix_y_axis_checkbox)
+        
         fft_layout.addLayout(fft_size_layout)
         fft_layout.addLayout(window_layout)
+        fft_layout.addLayout(y_axis_layout)
         fft_group.setLayout(fft_layout)
         
         # FFT position controls
@@ -474,9 +476,19 @@ class IQAnalyzer(QMainWindow):
         control_group.setLayout(control_layout)
         return control_group
     
-    def toggle_realtime_fft(self, state):
-        """Toggle real-time FFT updates during dragging"""
-        self.realtime_fft_enabled = (state == Qt.Checked)
+    def toggle_y_axis_lock(self, state):
+        """Toggle Y-axis lock for FFT plot"""
+        if state == Qt.Checked:
+            # Lock the current y-axis scale
+            self.fft_canvas.lock_y_axis()
+            self.status_bar.showMessage('FFT Y-axis scale locked')
+        else:
+            # Unlock the y-axis to allow auto-scaling
+            self.fft_canvas.unlock_y_axis()
+            # Force update to apply auto-scaling
+            if self.iq_data is not None:
+                self.update_fft()
+            self.status_bar.showMessage('FFT Y-axis scale unlocked - auto-scaling enabled')
     
     def invalidate_fft_cache(self):
         """Clear FFT cache when parameters change"""
@@ -522,7 +534,7 @@ class IQAnalyzer(QMainWindow):
         """Show about dialog"""
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.about(self, "About IQ Spectrum Analyzer", 
-                         "IQ Spectrum Analyzer v1.3\n\n"
+                         "IQ Spectrum Analyzer v1.4\n\n"
                          "A high-performance tool for analyzing IQ waveform data.\n\n"
                          "Performance Optimizations:\n"
                          "• Fast line plot updates without full redraw\n"
@@ -532,13 +544,16 @@ class IQAnalyzer(QMainWindow):
                          "• Real-time FFT region selection\n"
                          "• Multiple window functions\n"
                          "• Professional dark theme interface\n"
-                         "• Multiple time domain plot modes")
+                         "• Multiple time domain plot modes\n"
+                         "• FFT Y-axis scale lock control")
     
     def custom_fft_home_function(self):
         """Custom home function for FFT plot that properly auto-scales for current sampling rate"""
         if self.iq_data is not None:
             # Clear FFT zoom state to allow full auto-scaling
             self.fft_canvas.reset_zoom_state()
+            # Uncheck the y-axis lock checkbox
+            self.fix_y_axis_checkbox.setChecked(False)
             # Force reinitialize plot
             self.fft_canvas.plot_initialized = False
             # Replot with auto-scaling for the current sampling rate
@@ -736,6 +751,9 @@ class IQAnalyzer(QMainWindow):
                 self.iq_canvas.current_ylim = None
                 self.fft_canvas.reset_zoom_state()
                 self.fft_canvas.plot_initialized = False
+                
+                # Reset y-axis lock checkbox
+                self.fix_y_axis_checkbox.setChecked(False)
                 
                 self.plot_iq_data()
                 self.update_fft()
@@ -997,6 +1015,8 @@ class IQAnalyzer(QMainWindow):
             self.fft_canvas.reset_zoom_state()
             self.fft_canvas.plot_initialized = False
             self.fft_cache.clear()
+            # Reset y-axis lock checkbox when sampling rate changes
+            self.fix_y_axis_checkbox.setChecked(False)
             self.update_fft_with_auto_scale() # Update FFT with new frequency axis and auto-scale
     
     def update_fft_with_auto_scale(self):
@@ -1016,7 +1036,7 @@ class IQAnalyzer(QMainWindow):
 
         # Force reinitialize plot for auto-scaling
         self.fft_canvas.plot_initialized = False
-        self.fft_canvas.initialize_fft_plot(freq_data, fft_mag, window_type)
+        self.fft_canvas.initialize_fft_plot(freq_data, fft_mag, window_type, fix_y_axis=False)
 
         # Update status bar with FFT details
         start_sample = self.fft_start_sample
@@ -1063,8 +1083,11 @@ class IQAnalyzer(QMainWindow):
         freq_data, fft_mag, actual_samples = self.compute_fft_data(
             self.fft_start_sample, self.fft_size, window_type, self.sampling_rate)
 
+        # Check if y-axis should be fixed
+        fix_y_axis = self.fix_y_axis_checkbox.isChecked()
+
         # Use fast update method
-        self.fft_canvas.update_fft_data_fast(freq_data, fft_mag, window_type)
+        self.fft_canvas.update_fft_data_fast(freq_data, fft_mag, window_type, fix_y_axis)
 
         # Update status bar with FFT details
         start_sample = self.fft_start_sample
@@ -1167,7 +1190,7 @@ class IQAnalyzer(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("IQ Spectrum Analyzer")
-    app.setApplicationVersion("1.3")
+    app.setApplicationVersion("1.4")
     
     analyzer = IQAnalyzer()
     
