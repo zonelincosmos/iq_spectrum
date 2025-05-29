@@ -2,8 +2,9 @@ import sys
 import numpy as np
 from PyQt5.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                            QAction, QFileDialog, QToolBar, QLabel, QComboBox, QSpinBox,
-                           QPushButton, QStatusBar, QSplitter, QSizePolicy, QSlider, QGroupBox)
-from PyQt5.QtCore import Qt, QRectF
+                           QPushButton, QStatusBar, QSplitter, QSizePolicy, QSlider, QGroupBox,
+                           QCheckBox)
+from PyQt5.QtCore import Qt, QTimer
 from PyQt5.QtGui import QIcon, QPalette, QColor
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_qt5agg import FigureCanvasQTAgg as FigureCanvas
@@ -37,10 +38,12 @@ class IQPlotCanvas(FigureCanvas):
         # Store current axis limits to maintain zoom
         self.current_xlim = None
         self.current_ylim = None
+        # Store plot lines for efficient updates
+        self.plot_lines = []
 
 
 class FFTPlotCanvas(FigureCanvas):
-    """Canvas for plotting FFT spectrum with high-end dark styling"""
+    """Canvas for plotting FFT spectrum with high-end dark styling and performance optimizations"""
     def __init__(self, parent=None, width=5, height=4, dpi=100):
         # Set dark theme for matplotlib
         plt.style.use('dark_background')
@@ -59,6 +62,10 @@ class FFTPlotCanvas(FigureCanvas):
         # Store current axis limits to maintain zoom for FFT plot
         self.current_xlim = None
         self.current_ylim = None
+        
+        # Performance optimization: store plot line for fast updates
+        self.fft_line = None
+        self.plot_initialized = False
         
         # Setup high-end styling
         self.setup_dark_theme()
@@ -84,6 +91,63 @@ class FFTPlotCanvas(FigureCanvas):
         self.axes.xaxis.label.set_color('#cccccc')
         self.axes.yaxis.label.set_color('#cccccc')
         self.axes.title.set_color('#ffffff')
+    
+    def update_fft_data_fast(self, freq_data, mag_data, window_type):
+        """Fast FFT plot update using existing line object"""
+        if self.fft_line is None or not self.plot_initialized:
+            # Initialize plot on first call
+            self.initialize_fft_plot(freq_data, mag_data, window_type)
+        else:
+            # Fast update: only change data, don't recreate plot
+            self.fft_line.set_data(freq_data, mag_data)
+            
+            # Update y-axis limits only if needed
+            max_magnitude = np.max(mag_data)
+            current_ylim = self.axes.get_ylim()
+            new_ylim = (max_magnitude - 80, max_magnitude + 20)
+            
+            # Only update y-limits if there's a significant change (reduces redraws)
+            if abs(current_ylim[0] - new_ylim[0]) > 5 or abs(current_ylim[1] - new_ylim[1]) > 5:
+                self.axes.set_ylim(new_ylim)
+            
+            # Use fast drawing method
+            self.draw_idle()
+    
+    def initialize_fft_plot(self, freq_data, mag_data, window_type):
+        """Initialize the FFT plot with proper styling"""
+        self.axes.clear()
+        
+        # Create the line plot
+        self.fft_line, = self.axes.plot(freq_data, mag_data, linewidth=1, color='#00ff00')
+        
+        # Format frequency axis for better readability
+        if max(abs(freq_data)) > 1e6:
+            self.axes.set_xlabel('Frequency (MHz)', color='#cccccc', fontsize=11)
+        elif max(abs(freq_data)) > 1e3:
+            self.axes.set_xlabel('Frequency (kHz)', color='#cccccc', fontsize=11)
+        else:
+            self.axes.set_xlabel('Frequency (Hz)', color='#cccccc', fontsize=11)
+
+        self.axes.set_ylabel('Magnitude (dB)', color='#cccccc', fontsize=11)
+        self.axes.set_title(f'FFT Spectrum ({window_type.title()} Window)', 
+                           color='#ffffff', fontsize=12, fontweight='bold')
+        
+        # Set y-axis limits
+        max_magnitude = np.max(mag_data)
+        self.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 20)
+        
+        # Add fine grids (both major and minor)
+        self.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
+        self.axes.grid(True, which='minor', alpha=0.2, color='#444444', linewidth=0.4)
+        self.axes.minorticks_on()
+        
+        # Restore zoom if it exists
+        if self.current_xlim is not None and self.current_ylim is not None:
+            self.axes.set_xlim(self.current_xlim)
+            self.axes.set_ylim(self.current_ylim)
+        
+        self.plot_initialized = True
+        self.draw()
 
 
 class IQAnalyzer(QMainWindow):
@@ -97,6 +161,17 @@ class IQAnalyzer(QMainWindow):
         self.fft_size = 1024  # Current FFT size
         self.dragging = False
         self.time_plot_mode = "20*log10(abs(I+Q))"  # Default time domain plot mode
+        
+        # Performance optimization settings - always real-time
+        self.fft_update_timer = QTimer()
+        self.fft_update_timer.timeout.connect(self.delayed_fft_update)
+        self.fft_update_timer.setSingleShot(True)
+        self.fft_update_delay = 16  # ~60 FPS for smooth updates
+        self.pending_fft_update = False
+        
+        # Cache for FFT computation to avoid recalculation
+        self.fft_cache = {}
+        self.last_fft_params = None
         
         # Setup dark theme for the application
         self.setup_dark_theme()
@@ -167,6 +242,21 @@ class IQAnalyzer(QMainWindow):
                 margin: -2px 0;
                 border-radius: 9px;
             }
+            QCheckBox {
+                color: #ffffff;
+            }
+            QCheckBox::indicator {
+                width: 13px;
+                height: 13px;
+            }
+            QCheckBox::indicator:unchecked {
+                background-color: #404040;
+                border: 1px solid #555555;
+            }
+            QCheckBox::indicator:checked {
+                background-color: #0078d4;
+                border: 1px solid #005a9e;
+            }
             QStatusBar {
                 background-color: #333333;
                 color: #ffffff;
@@ -192,7 +282,7 @@ class IQAnalyzer(QMainWindow):
     
     def initUI(self):
         """Initialize the user interface"""
-        self.setWindowTitle('IQ Spectrum Analyzer v1.0 - Professional Edition')
+        self.setWindowTitle('IQ Spectrum Analyzer v1.2 - Ultra Performance Edition')
         self.setGeometry(100, 100, 1400, 900)
         
         # Main widget and layout
@@ -317,7 +407,7 @@ class IQAnalyzer(QMainWindow):
         window_types = ["Rectangle", "Hamming", "Hanning", "Blackman", "Bartlett"]
         self.window_combo.addItems(window_types)
         self.window_combo.setCurrentIndex(1)  # Default to Hamming
-        self.window_combo.currentIndexChanged.connect(self.update_fft)
+        self.window_combo.currentIndexChanged.connect(self.invalidate_fft_cache)
         window_layout.addWidget(self.window_combo)
         
         fft_layout.addLayout(fft_size_layout)
@@ -352,6 +442,17 @@ class IQAnalyzer(QMainWindow):
         
         control_group.setLayout(control_layout)
         return control_group
+    
+    def toggle_realtime_fft(self, state):
+        """Toggle real-time FFT updates during dragging"""
+        self.realtime_fft_enabled = (state == Qt.Checked)
+    
+    def invalidate_fft_cache(self):
+        """Clear FFT cache when parameters change"""
+        self.fft_cache.clear()
+        self.last_fft_params = None
+        if self.iq_data is not None:
+            self.update_fft()
     
     def create_menu_bar(self):
         """Create menu bar"""
@@ -390,18 +491,19 @@ class IQAnalyzer(QMainWindow):
         """Show about dialog"""
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.about(self, "About IQ Spectrum Analyzer", 
-                         "IQ Spectrum Analyzer v1.0 - Professional Edition\n\n"
-                         "A tool for analyzing IQ waveform data in time and frequency domains.\n\n"
+                         "IQ Spectrum Analyzer v1.2 - Ultra Performance Edition\n\n"
+                         "A high-performance tool for analyzing IQ waveform data.\n\n"
+                         "Performance Optimizations:\n"
+                         "• 16ms FFT update timer (~60 FPS)\n"
+                         "• Smart FFT data caching\n"
+                         "• Fast line plot updates without full redraw\n"
+                         "• Optimized rectangle highlighting\n"
+                         "• Efficient zoom preservation\n\n"
                          "Features:\n"
-                         "• Load IQ data from various file formats\n"
-                         "• Interactive FFT region selection\n"
+                         "• Real-time FFT region selection\n"
                          "• Multiple window functions\n"
-                         "• Real-time spectrum analysis\n"
-                         "• Multiple time domain plot modes\n"
-                         "• Professional dark theme interface\n\n"
-                         "Usage:\n"
-                         "• Click on time domain plot to set FFT start position\n"
-                         "• Zoom is preserved when selecting FFT regions")
+                         "• Professional dark theme interface\n"
+                         "• Multiple time domain plot modes")
     
     def custom_fft_home_function(self):
         """Custom home function for FFT plot that properly auto-scales for current sampling rate"""
@@ -409,6 +511,8 @@ class IQAnalyzer(QMainWindow):
             # Clear FFT zoom state to allow full auto-scaling
             self.fft_canvas.current_xlim = None
             self.fft_canvas.current_ylim = None
+            # Force reinitialize plot
+            self.fft_canvas.plot_initialized = False
             # Replot with auto-scaling for the current sampling rate
             self.update_fft_with_auto_scale()
         else:
@@ -422,7 +526,8 @@ class IQAnalyzer(QMainWindow):
             self.iq_canvas.current_xlim = None
             self.iq_canvas.current_ylim = None
             # Replot with auto-scaling for the current plot mode
-            self.plot_iq_data()  # This will auto-scale properly since zoom state is cleared
+            # Pass auto_scale=True to ensure proper handling
+            self.plot_iq_data(auto_scale=True)
         else:
             # If no data, use the default home function
             self.iq_toolbar.home_original()
@@ -466,6 +571,66 @@ class IQAnalyzer(QMainWindow):
         if self.fft_canvas.current_xlim is not None and self.fft_canvas.current_ylim is not None:
             self.fft_canvas.axes.set_xlim(self.fft_canvas.current_xlim)
             self.fft_canvas.axes.set_ylim(self.fft_canvas.current_ylim)
+    
+    def compute_fft_data(self, start_sample, fft_size, window_type, sampling_rate):
+        """Compute FFT data with caching for performance"""
+        # Create cache key
+        cache_key = (start_sample, fft_size, window_type, sampling_rate)
+        
+        # Check cache first
+        if cache_key in self.fft_cache:
+            return self.fft_cache[cache_key]
+        
+        # Calculate FFT region
+        end_sample = min(len(self.iq_data), start_sample + fft_size)
+        data_segment = self.iq_data[start_sample:end_sample]
+        
+        # Apply window function
+        window_type_lower = window_type.lower()
+        if window_type_lower == 'rectangle':
+            windowed_data = data_segment
+        elif window_type_lower == 'hamming':
+            windowed_data = data_segment * np.hamming(len(data_segment))
+        elif window_type_lower == 'hanning':
+            windowed_data = data_segment * np.hanning(len(data_segment))
+        elif window_type_lower == 'blackman':
+            windowed_data = data_segment * np.blackman(len(data_segment))
+        elif window_type_lower == 'bartlett':
+            windowed_data = data_segment * np.bartlett(len(data_segment))
+        else:
+            windowed_data = data_segment
+        
+        # Zero-padding if necessary
+        if len(windowed_data) < fft_size:
+            padded_data = np.zeros(fft_size, dtype=complex)
+            padded_data[:len(windowed_data)] = windowed_data
+            windowed_data = padded_data
+        
+        # Perform FFT and shift
+        fft_result = np.fft.fftshift(np.fft.fft(windowed_data, fft_size))
+        fft_mag = 20 * np.log10(np.abs(fft_result) + 1e-12)  # dB scale
+        
+        # Calculate frequency axis
+        freq_axis = np.fft.fftshift(np.fft.fftfreq(fft_size, 1/(sampling_rate * 1e6)))
+        
+        # Format frequency axis for better readability
+        if max(abs(freq_axis)) > 1e6:
+            freq_data = freq_axis / 1e6
+        elif max(abs(freq_axis)) > 1e3:
+            freq_data = freq_axis / 1e3
+        else:
+            freq_data = freq_axis
+        
+        result = (freq_data, fft_mag, end_sample - start_sample)
+        
+        # Cache result (limit cache size to prevent memory issues)
+        if len(self.fft_cache) > 50:  # Limit cache size
+            # Remove oldest entry
+            oldest_key = next(iter(self.fft_cache))
+            del self.fft_cache[oldest_key]
+        
+        self.fft_cache[cache_key] = result
+        return result
     
     def open_file(self):
         """Open and load IQ data file"""
@@ -528,6 +693,10 @@ class IQAnalyzer(QMainWindow):
                 self.fft_start_sample = 0  # Start from beginning
                 self.fft_size = int(self.fft_size_combo.currentText())
                 
+                # Clear caches
+                self.fft_cache.clear()
+                self.last_fft_params = None
+                
                 # Update position slider
                 self.position_slider.setEnabled(True)
                 # Ensure maximum is at least 0 to prevent errors with very small data
@@ -539,6 +708,7 @@ class IQAnalyzer(QMainWindow):
                 self.iq_canvas.current_ylim = None
                 self.fft_canvas.current_xlim = None
                 self.fft_canvas.current_ylim = None
+                self.fft_canvas.plot_initialized = False
                 
                 self.plot_iq_data()
                 self.update_fft()
@@ -559,40 +729,48 @@ class IQAnalyzer(QMainWindow):
         
         self.iq_canvas.axes.clear()
         
+        # IMPORTANT: Reset the rectangle reference after clearing axes
+        self.iq_canvas.fft_region_rect = None        
+            
         # Create sample axis
         sample_axis = np.arange(len(self.iq_data))
         
         # Plot based on selected mode
         if self.time_plot_mode == "20*log10(abs(I+Q))":
             magnitude_db = 20 * np.log10(np.abs(self.iq_data) + 1e-12)  # Add small value to avoid log(0)
-            self.iq_canvas.axes.plot(sample_axis, magnitude_db, label='20*log10(|I+jQ|)', 
+            line, = self.iq_canvas.axes.plot(sample_axis, magnitude_db, label='20*log10(|I+jQ|)', 
                                     linewidth=1.2, color='#ffff00', alpha=0.8)
             ylabel = 'Magnitude (dB)'
             title_suffix = 'Magnitude (dB)'
+            self.iq_canvas.plot_lines = [line]
         elif self.time_plot_mode == "abs(I+Q)":
             magnitude = np.abs(self.iq_data)
-            self.iq_canvas.axes.plot(sample_axis, magnitude, label='|I+jQ|', 
+            line, = self.iq_canvas.axes.plot(sample_axis, magnitude, label='|I+jQ|', 
                                     linewidth=1.2, color='#00ff00', alpha=0.8)
             ylabel = 'Magnitude'
             title_suffix = 'Magnitude'
+            self.iq_canvas.plot_lines = [line]
         elif self.time_plot_mode == "I+Q":
             # Plot I and Q components with enhanced styling
-            self.iq_canvas.axes.plot(sample_axis, np.real(self.iq_data), label='I', 
+            line1, = self.iq_canvas.axes.plot(sample_axis, np.real(self.iq_data), label='I', 
                                     linewidth=1.2, color='#00bfff', alpha=0.8)
-            self.iq_canvas.axes.plot(sample_axis, np.imag(self.iq_data), label='Q', 
+            line2, = self.iq_canvas.axes.plot(sample_axis, np.imag(self.iq_data), label='Q', 
                                     linewidth=1.2, color='#ff6b6b', alpha=0.8)
             ylabel = 'Amplitude'
             title_suffix = 'I and Q Components'
+            self.iq_canvas.plot_lines = [line1, line2]
         elif self.time_plot_mode == "I only":
-            self.iq_canvas.axes.plot(sample_axis, np.real(self.iq_data), label='I', 
+            line, = self.iq_canvas.axes.plot(sample_axis, np.real(self.iq_data), label='I', 
                                     linewidth=1.2, color='#00bfff', alpha=0.8)
             ylabel = 'Amplitude'
             title_suffix = 'I Component Only'
+            self.iq_canvas.plot_lines = [line]
         elif self.time_plot_mode == "Q only":
-            self.iq_canvas.axes.plot(sample_axis, np.imag(self.iq_data), label='Q', 
+            line, = self.iq_canvas.axes.plot(sample_axis, np.imag(self.iq_data), label='Q', 
                                     linewidth=1.2, color='#ff6b6b', alpha=0.8)
             ylabel = 'Amplitude'
             title_suffix = 'Q Component Only'
+            self.iq_canvas.plot_lines = [line]
         
         # Set labels and legend with dark theme styling
         self.iq_canvas.axes.set_xlabel('Sample Number', color='#cccccc', fontsize=11)
@@ -639,16 +817,9 @@ class IQAnalyzer(QMainWindow):
         self.iq_canvas.draw()
     
     def highlight_fft_region(self):
-        """Add a colored rectangle to highlight the FFT analysis region"""
+        """Add a colored rectangle to highlight the FFT analysis region - optimized version"""
         if self.iq_data is None:
             return
-        
-        # Remove any existing rectangle and annotations to prevent duplicates
-        if self.iq_canvas.fft_region_rect:
-            self.iq_canvas.fft_region_rect.remove()
-            self.iq_canvas.fft_region_rect = None
-        for ann in self.iq_canvas.axes.texts:
-            ann.remove()
         
         # Calculate FFT region boundaries using sample indices
         start_sample = self.fft_start_sample
@@ -657,13 +828,34 @@ class IQAnalyzer(QMainWindow):
         # Get current y-axis limits (after data has been plotted and autoscaled)
         y_min, y_max = self.iq_canvas.axes.get_ylim()
         
-        # Add semi-transparent rectangle with enhanced styling
-        rect = Rectangle((start_sample, y_min), end_sample - start_sample, y_max - y_min,
-                        facecolor='#00ffff', alpha=0.15, edgecolor='#00bfff', linewidth=2.0)
-        self.iq_canvas.axes.add_patch(rect)
+        # If rectangle exists, just update its position instead of recreating
+        if self.iq_canvas.fft_region_rect:
+            self.iq_canvas.fft_region_rect.set_x(start_sample)
+            self.iq_canvas.fft_region_rect.set_width(end_sample - start_sample)
+            self.iq_canvas.fft_region_rect.set_y(y_min)
+            self.iq_canvas.fft_region_rect.set_height(y_max - y_min)
+        else:
+            # Create new rectangle only if it doesn't exist
+            rect = Rectangle((start_sample, y_min), end_sample - start_sample, y_max - y_min,
+                            facecolor='#00ffff', alpha=0.15, edgecolor='#00bfff', linewidth=2.0)
+            self.iq_canvas.axes.add_patch(rect)
+            self.iq_canvas.fft_region_rect = rect
+    
+    def update_fft_region_only(self):
+        """Update only the FFT region rectangle position - very fast"""
+        if self.iq_data is None or not self.iq_canvas.fft_region_rect:
+            return
         
-        # Store reference for mouse interaction
-        self.iq_canvas.fft_region_rect = rect
+        # Calculate FFT region boundaries
+        start_sample = self.fft_start_sample
+        end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+        
+        # Update rectangle position
+        self.iq_canvas.fft_region_rect.set_x(start_sample)
+        self.iq_canvas.fft_region_rect.set_width(end_sample - start_sample)
+        
+        # Use idle drawing for fast update
+        self.iq_canvas.draw_idle()
     
     def on_mouse_press(self, event):
         """Handle mouse press for FFT region selection"""
@@ -684,7 +876,10 @@ class IQAnalyzer(QMainWindow):
                                           max(0, len(self.iq_data) - self.fft_size))
             
             self.update_position_controls()
-            # No plot/FFT update here, as on_mouse_move or on_mouse_release will handle it
+            # Update region immediately
+            self.update_fft_region_only()
+            # Schedule FFT update - always enabled now
+            self.schedule_fft_update()
     
     def on_mouse_move(self, event):
         """Handle mouse move for dragging FFT region"""
@@ -705,8 +900,10 @@ class IQAnalyzer(QMainWindow):
         if new_fft_start_sample != self.fft_start_sample:
             self.fft_start_sample = new_fft_start_sample
             self.update_position_controls()
-            self.plot_iq_data() # Redraw IQ plot to update highlight
-            self.update_fft()   # Update FFT as region changed
+            # Only update the rectangle position, not the entire plot
+            self.update_fft_region_only()
+            # Schedule FFT update - always enabled now
+            self.schedule_fft_update()
     
     def on_mouse_release(self, event):
         """Handle mouse release"""
@@ -715,10 +912,24 @@ class IQAnalyzer(QMainWindow):
             self.dragging = False  # Reset dragging state but don't update plots
             return
         
+        was_dragging = self.dragging
         self.dragging = False
-        # Ensure plot and FFT are updated one last time after release
-        if self.iq_data is not None:
-            self.plot_iq_data()
+        # Ensure FFT is updated one last time after release
+        if self.iq_data is not None and was_dragging:
+            # Cancel any pending timer and update immediately
+            self.fft_update_timer.stop()
+            self.update_fft()
+    
+    def schedule_fft_update(self):
+        """Schedule an FFT update with a delay to avoid too frequent updates"""
+        self.pending_fft_update = True
+        self.fft_update_timer.stop()
+        self.fft_update_timer.start(self.fft_update_delay)
+    
+    def delayed_fft_update(self):
+        """Perform the delayed FFT update"""
+        if self.pending_fft_update:
+            self.pending_fft_update = False
             self.update_fft()
     
     def update_position_controls(self):
@@ -729,7 +940,9 @@ class IQAnalyzer(QMainWindow):
         else:
             self.position_slider.setMaximum(0) # No data, slider max is 0
 
+        self.position_slider.blockSignals(True)  # Prevent recursive updates
         self.position_slider.setValue(self.fft_start_sample)
+        self.position_slider.blockSignals(False)
         self.position_label.setText(f"Start Sample: {self.fft_start_sample}")
     
     def update_fft_position(self):
@@ -744,17 +957,20 @@ class IQAnalyzer(QMainWindow):
         if new_fft_start_sample != self.fft_start_sample:
             self.fft_start_sample = new_fft_start_sample
             self.position_label.setText(f"Start Sample: {self.fft_start_sample}")
-            self.plot_iq_data()
-            self.update_fft()
+            # Only update rectangle for slider movement
+            self.update_fft_region_only()
+            # Always use delayed FFT update for smooth slider response
+            self.schedule_fft_update()
     
     def update_sampling_rate(self):
         """Update sampling rate and refresh FFT plot"""
         self.sampling_rate = self.sampling_rate_input.value()
         if self.iq_data is not None:
-            # Clear FFT zoom state completely when sampling rate changes
-            # This prevents old frequency zoom ranges from being restored
+            # Clear FFT zoom state and cache when sampling rate changes
             self.fft_canvas.current_xlim = None
             self.fft_canvas.current_ylim = None
+            self.fft_canvas.plot_initialized = False
+            self.fft_cache.clear()
             self.update_fft_with_auto_scale() # Update FFT with new frequency axis and auto-scale
     
     def update_fft_with_auto_scale(self):
@@ -766,82 +982,30 @@ class IQAnalyzer(QMainWindow):
         self.sampling_rate = self.sampling_rate_input.value()
 
         # Get window function
-        window_type = self.window_combo.currentText().lower()
+        window_type = self.window_combo.currentText()
 
-        # Calculate FFT region (using start sample)
-        start_sample = self.fft_start_sample
-        end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+        # Compute FFT data using optimized function
+        freq_data, fft_mag, actual_samples = self.compute_fft_data(
+            self.fft_start_sample, self.fft_size, window_type, self.sampling_rate)
 
-        # Extract data segment for FFT
-        data_segment = self.iq_data[start_sample:end_sample]
-
-        # Apply window function
-        if window_type == 'rectangle':
-            windowed_data = data_segment
-        elif window_type == 'hamming':
-            windowed_data = data_segment * np.hamming(len(data_segment))
-        elif window_type == 'hanning':
-            windowed_data = data_segment * np.hanning(len(data_segment))
-        elif window_type == 'blackman':
-            windowed_data = data_segment * np.blackman(len(data_segment))
-        elif window_type == 'bartlett':
-            windowed_data = data_segment * np.bartlett(len(data_segment))
-        else:
-            windowed_data = data_segment
-
-        # Zero-padding if necessary
-        if len(windowed_data) < self.fft_size:
-            padded_data = np.zeros(self.fft_size, dtype=complex)
-            padded_data[:len(windowed_data)] = windowed_data
-            windowed_data = padded_data
-
-        # Perform FFT and shift
-        fft_result = np.fft.fftshift(np.fft.fft(windowed_data, self.fft_size))
-        fft_mag = 20 * np.log10(np.abs(fft_result) + 1e-12)  # dB scale
-
-        # Calculate frequency axis using the now updated self.sampling_rate
-        freq_axis = np.fft.fftshift(np.fft.fftfreq(self.fft_size, 1/(self.sampling_rate * 1e6)))
-
-        # Update FFT plot
-        self.fft_canvas.axes.clear()
-
-        # Format frequency axis for better readability
-        # This part will now correctly use the scaled freq_axis
-        if max(abs(freq_axis)) > 1e6:
-            self.fft_canvas.axes.plot(freq_axis / 1e6, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (MHz)')
-        elif max(abs(freq_axis)) > 1e3:
-            self.fft_canvas.axes.plot(freq_axis / 1e3, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (kHz)')
-        else:
-            self.fft_canvas.axes.plot(freq_axis, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (Hz)')
-
-        self.fft_canvas.axes.set_ylabel('Magnitude (dB)')
-        self.fft_canvas.axes.set_title(f'FFT Spectrum ({window_type.title()} Window)')
-        
-        # Set y-axis limits: 20 dB higher than max, and 80 dB below max
-        max_magnitude = np.max(fft_mag)
-        self.fft_canvas.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 20)
-        
-        # Add fine grids (both major and minor)
-        self.fft_canvas.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
-        self.fft_canvas.axes.grid(True, which='minor', alpha=0.2, color='#444444', linewidth=0.4)
-        self.fft_canvas.axes.minorticks_on()
-
-        # Do NOT restore FFT zoom level - we want auto-scaling for new frequency range
-
-        self.fft_canvas.draw()
+        # Force reinitialize plot for auto-scaling
+        self.fft_canvas.plot_initialized = False
+        self.fft_canvas.initialize_fft_plot(freq_data, fft_mag, window_type)
 
         # Update status bar with FFT details
+        start_sample = self.fft_start_sample
+        end_sample = start_sample + actual_samples
         freq_resolution = self.sampling_rate * 1e6 / self.fft_size
         self.status_bar.showMessage(
-            f'FFT: samples {start_sample}-{end_sample} ({end_sample-start_sample} samples), '
+            f'FFT: samples {start_sample}-{end_sample} ({actual_samples} samples), '
             f'{self.fft_size} FFT points, Resolution: {freq_resolution:.2f} Hz')
     
     def update_fft_size(self):
         """Update FFT size and refresh analysis"""
         self.fft_size = int(self.fft_size_combo.currentText())
+        
+        # Clear cache when FFT size changes
+        self.fft_cache.clear()
         
         if self.iq_data is not None:
             # Update position slider range
@@ -856,89 +1020,32 @@ class IQAnalyzer(QMainWindow):
             self.update_fft()
     
     def update_fft(self):
-        """Update the FFT plot based on the selected region"""
+        """Update the FFT plot based on the selected region - optimized version"""
         if self.iq_data is None:
             return
 
-        # Store current FFT zoom level before clearing
+        # Store current FFT zoom level before updating
         self.store_fft_zoom()
 
         # Update self.sampling_rate from the input spinbox
         self.sampling_rate = self.sampling_rate_input.value()
 
         # Get window function
-        window_type = self.window_combo.currentText().lower()
+        window_type = self.window_combo.currentText()
 
-        # Calculate FFT region (using start sample)
-        start_sample = self.fft_start_sample
-        end_sample = min(len(self.iq_data), start_sample + self.fft_size)
+        # Compute FFT data using optimized function with caching
+        freq_data, fft_mag, actual_samples = self.compute_fft_data(
+            self.fft_start_sample, self.fft_size, window_type, self.sampling_rate)
 
-        # Extract data segment for FFT
-        data_segment = self.iq_data[start_sample:end_sample]
-
-        # Apply window function
-        if window_type == 'rectangle':
-            windowed_data = data_segment
-        elif window_type == 'hamming':
-            windowed_data = data_segment * np.hamming(len(data_segment))
-        elif window_type == 'hanning':
-            windowed_data = data_segment * np.hanning(len(data_segment))
-        elif window_type == 'blackman':
-            windowed_data = data_segment * np.blackman(len(data_segment))
-        elif window_type == 'bartlett':
-            windowed_data = data_segment * np.bartlett(len(data_segment))
-        else:
-            windowed_data = data_segment
-
-        # Zero-padding if necessary
-        if len(windowed_data) < self.fft_size:
-            padded_data = np.zeros(self.fft_size, dtype=complex)
-            padded_data[:len(windowed_data)] = windowed_data
-            windowed_data = padded_data
-
-        # Perform FFT and shift
-        fft_result = np.fft.fftshift(np.fft.fft(windowed_data, self.fft_size))
-        fft_mag = 20 * np.log10(np.abs(fft_result) + 1e-12)  # dB scale
-
-        # Calculate frequency axis using the now updated self.sampling_rate
-        freq_axis = np.fft.fftshift(np.fft.fftfreq(self.fft_size, 1/(self.sampling_rate * 1e6)))
-
-        # Update FFT plot
-        self.fft_canvas.axes.clear()
-
-        # Format frequency axis for better readability
-        # This part will now correctly use the scaled freq_axis
-        if max(abs(freq_axis)) > 1e6:
-            self.fft_canvas.axes.plot(freq_axis / 1e6, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (MHz)')
-        elif max(abs(freq_axis)) > 1e3:
-            self.fft_canvas.axes.plot(freq_axis / 1e3, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (kHz)')
-        else:
-            self.fft_canvas.axes.plot(freq_axis, fft_mag, linewidth=1)
-            self.fft_canvas.axes.set_xlabel('Frequency (Hz)')
-
-        self.fft_canvas.axes.set_ylabel('Magnitude (dB)')
-        self.fft_canvas.axes.set_title(f'FFT Spectrum ({window_type.title()} Window)')
-        
-        # Set y-axis limits: 20 dB higher than max, and 80 dB below max
-        max_magnitude = np.max(fft_mag)
-        self.fft_canvas.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 20)
-        
-        # Add fine grids (both major and minor)
-        self.fft_canvas.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
-        self.fft_canvas.axes.grid(True, which='minor', alpha=0.2, color='#444444', linewidth=0.4)
-        self.fft_canvas.axes.minorticks_on()
-
-        # Restore FFT zoom level if it existed
-        self.restore_fft_zoom()
-
-        self.fft_canvas.draw()
+        # Use fast update method
+        self.fft_canvas.update_fft_data_fast(freq_data, fft_mag, window_type)
 
         # Update status bar with FFT details
+        start_sample = self.fft_start_sample
+        end_sample = start_sample + actual_samples
         freq_resolution = self.sampling_rate * 1e6 / self.fft_size
         self.status_bar.showMessage(
-            f'FFT: samples {start_sample}-{end_sample} ({end_sample-start_sample} samples), '
+            f'FFT: samples {start_sample}-{end_sample} ({actual_samples} samples), '
             f'{self.fft_size} FFT points, Resolution: {freq_resolution:.2f} Hz')
     
     def save_image(self):
@@ -1034,7 +1141,7 @@ class IQAnalyzer(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("IQ Spectrum Analyzer")
-    app.setApplicationVersion("1.0")
+    app.setApplicationVersion("1.2")
     
     analyzer = IQAnalyzer()
     
