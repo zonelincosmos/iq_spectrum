@@ -63,12 +63,34 @@ class FFTPlotCanvas(FigureCanvas):
         self.current_xlim = None
         self.current_ylim = None
         
+        # Track whether user has manually zoomed
+        self.user_has_zoomed = False
+        
         # Performance optimization: store plot line for fast updates
         self.fft_line = None
         self.plot_initialized = False
         
         # Setup high-end styling
         self.setup_dark_theme()
+        
+        # Connect to zoom/pan events
+        self.mpl_connect('button_release_event', self.on_zoom_pan_event)
+    
+    def on_zoom_pan_event(self, event):
+        """Detect when user has manually zoomed or panned"""
+        if event.inaxes == self.axes:
+            # Check if the current view limits differ from the auto-scaled limits
+            # This indicates the user has zoomed/panned
+            if self.fft_line is not None and len(self.fft_line.get_ydata()) > 0:
+                data = self.fft_line.get_ydata()
+                max_magnitude = np.max(data)
+                auto_ylim = (max_magnitude - 80, max_magnitude + 10)
+                current_ylim = self.axes.get_ylim()
+                
+                # If current limits differ significantly from auto limits, user has zoomed
+                if (abs(current_ylim[0] - auto_ylim[0]) > 1 or 
+                    abs(current_ylim[1] - auto_ylim[1]) > 1):
+                    self.user_has_zoomed = True
     
     def setup_dark_theme(self):
         """Configure dark theme styling for the FFT plot"""
@@ -102,20 +124,16 @@ class FFTPlotCanvas(FigureCanvas):
             self.fft_line.set_data(freq_data, mag_data)
             
             # Only auto-adjust y-axis if user hasn't manually zoomed
-            # Check if current zoom state represents manual zoom vs auto-scaling
-            if self.current_ylim is None:
-                # No stored zoom state - this means auto-scaling is appropriate
+            if not self.user_has_zoomed:
+                # Auto-scaling is appropriate
                 max_magnitude = np.max(mag_data)
                 current_ylim = self.axes.get_ylim()
-                new_ylim = (max_magnitude - 70, max_magnitude + 20)
+                new_ylim = (max_magnitude - 80, max_magnitude + 10)
                 
                 # Only update y-limits if there's a significant change (reduces redraws)
                 if abs(current_ylim[0] - new_ylim[0]) > 5 or abs(current_ylim[1] - new_ylim[1]) > 5:
                     self.axes.set_ylim(new_ylim)
-            else:
-                # User has manually zoomed - preserve their zoom level
-                # Don't auto-adjust the y-axis, keep the user's manual zoom
-                pass
+            # else: User has manually zoomed - preserve their zoom level
             
             # Use fast drawing method
             self.draw_idle()
@@ -141,20 +159,26 @@ class FFTPlotCanvas(FigureCanvas):
         
         # Set y-axis limits
         max_magnitude = np.max(mag_data)
-        self.axes.set_ylim(bottom=max_magnitude - 70, top=max_magnitude + 20)
+        self.axes.set_ylim(bottom=max_magnitude - 80, top=max_magnitude + 10)
         
         # Add fine grids (both major and minor)
         self.axes.grid(True, which='major', alpha=0.4, color='#666666', linewidth=0.8)
         self.axes.grid(True, which='minor', alpha=0.2, color='#444444', linewidth=0.4)
         self.axes.minorticks_on()
         
-        # Restore zoom if it exists
-        if self.current_xlim is not None and self.current_ylim is not None:
+        # Restore zoom if it exists and user has zoomed
+        if self.user_has_zoomed and self.current_xlim is not None and self.current_ylim is not None:
             self.axes.set_xlim(self.current_xlim)
             self.axes.set_ylim(self.current_ylim)
         
         self.plot_initialized = True
         self.draw()
+    
+    def reset_zoom_state(self):
+        """Reset the zoom state (called when home button is pressed or data is loaded)"""
+        self.user_has_zoomed = False
+        self.current_xlim = None
+        self.current_ylim = None
 
 
 class IQAnalyzer(QMainWindow):
@@ -514,8 +538,7 @@ class IQAnalyzer(QMainWindow):
         """Custom home function for FFT plot that properly auto-scales for current sampling rate"""
         if self.iq_data is not None:
             # Clear FFT zoom state to allow full auto-scaling
-            self.fft_canvas.current_xlim = None
-            self.fft_canvas.current_ylim = None
+            self.fft_canvas.reset_zoom_state()
             # Force reinitialize plot
             self.fft_canvas.plot_initialized = False
             # Replot with auto-scaling for the current sampling rate
@@ -711,8 +734,7 @@ class IQAnalyzer(QMainWindow):
                 # Reset zoom state for both plots
                 self.iq_canvas.current_xlim = None
                 self.iq_canvas.current_ylim = None
-                self.fft_canvas.current_xlim = None
-                self.fft_canvas.current_ylim = None
+                self.fft_canvas.reset_zoom_state()
                 self.fft_canvas.plot_initialized = False
                 
                 self.plot_iq_data()
@@ -972,8 +994,7 @@ class IQAnalyzer(QMainWindow):
         self.sampling_rate = self.sampling_rate_input.value()
         if self.iq_data is not None:
             # Clear FFT zoom state and cache when sampling rate changes
-            self.fft_canvas.current_xlim = None
-            self.fft_canvas.current_ylim = None
+            self.fft_canvas.reset_zoom_state()
             self.fft_canvas.plot_initialized = False
             self.fft_cache.clear()
             self.update_fft_with_auto_scale() # Update FFT with new frequency axis and auto-scale
@@ -1146,7 +1167,7 @@ class IQAnalyzer(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("IQ Spectrum Analyzer")
-    app.setApplicationVersion("1.2")
+    app.setApplicationVersion("1.3")
     
     analyzer = IQAnalyzer()
     
