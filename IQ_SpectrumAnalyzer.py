@@ -16,6 +16,36 @@ import matplotlib.colors as mcolors
 from matplotlib.colors import LinearSegmentedColormap
 
 
+class CustomNavigationToolbar(NavigationToolbar):
+    """Custom navigation toolbar that overrides home button for time-domain plot"""
+    def __init__(self, canvas, parent, main_window):
+        super().__init__(canvas, parent)
+        self.main_window = main_window
+    
+    def home(self, *args):
+        """Override home button to use custom function"""
+        #print("Custom home function called for time-domain plot!")  # Debug print
+        if hasattr(self.main_window, 'custom_home_function'):
+            self.main_window.custom_home_function()
+        else:
+            super().home(*args)
+
+
+class CustomFFTNavigationToolbar(NavigationToolbar):
+    """Custom navigation toolbar that overrides home button for FFT plot"""
+    def __init__(self, canvas, parent, main_window):
+        super().__init__(canvas, parent)
+        self.main_window = main_window
+    
+    def home(self, *args):
+        """Override home button to use custom FFT function"""
+        #print("Custom FFT home function called!")  # Debug print
+        if hasattr(self.main_window, 'custom_fft_home_function'):
+            self.main_window.custom_fft_home_function()
+        else:
+            super().home(*args)
+
+
 class IQPlotCanvas(FigureCanvas):
     """Canvas for plotting IQ waveform data with FFT region highlighting"""
     def __init__(self, parent=None, width=5, height=4, dpi=100):
@@ -331,11 +361,8 @@ class IQAnalyzer(QMainWindow):
         time_layout.addWidget(time_label)
         
         self.iq_canvas = IQPlotCanvas(time_widget)
-        self.iq_toolbar = NavigationToolbar(self.iq_canvas, time_widget)
-        
-        # Connect to toolbar home button to ensure proper auto-scaling
-        self.iq_toolbar.home_original = self.iq_toolbar.home
-        self.iq_toolbar.home = self.custom_home_function
+        # Use custom navigation toolbar for time-domain plot
+        self.iq_toolbar = CustomNavigationToolbar(self.iq_canvas, time_widget, self)
         
         time_layout.addWidget(self.iq_toolbar)
         time_layout.addWidget(self.iq_canvas)
@@ -350,11 +377,8 @@ class IQAnalyzer(QMainWindow):
         fft_layout.addWidget(fft_label)
         
         self.fft_canvas = FFTPlotCanvas(fft_widget)
-        self.fft_toolbar = NavigationToolbar(self.fft_canvas, fft_widget)
-        
-        # Connect to FFT toolbar home button to ensure proper auto-scaling
-        self.fft_toolbar.home_original = self.fft_toolbar.home
-        self.fft_toolbar.home = self.custom_fft_home_function
+        # Use custom navigation toolbar for FFT plot
+        self.fft_toolbar = CustomFFTNavigationToolbar(self.fft_canvas, fft_widget, self)
         
         fft_layout.addWidget(self.fft_toolbar)
         fft_layout.addWidget(self.fft_canvas)
@@ -534,7 +558,7 @@ class IQAnalyzer(QMainWindow):
         """Show about dialog"""
         from PyQt5.QtWidgets import QMessageBox
         QMessageBox.about(self, "About IQ Spectrum Analyzer", 
-                         "IQ Spectrum Analyzer v1.4\n\n"
+                         "IQ Spectrum Analyzer v1.5\n\n"
                          "A high-performance tool for analyzing IQ waveform data.\n\n"
                          "Performance Optimizations:\n"
                          "• Fast line plot updates without full redraw\n"
@@ -545,10 +569,12 @@ class IQAnalyzer(QMainWindow):
                          "• Multiple window functions\n"
                          "• Professional dark theme interface\n"
                          "• Multiple time domain plot modes\n"
-                         "• FFT Y-axis scale lock control")
+                         "• FFT Y-axis scale lock control\n"
+                         "• Fixed custom home button functionality")
     
     def custom_fft_home_function(self):
         """Custom home function for FFT plot that properly auto-scales for current sampling rate"""
+        #print("Executing custom FFT home function...")  # Debug print
         if self.iq_data is not None:
             # Clear FFT zoom state to allow full auto-scaling
             self.fft_canvas.reset_zoom_state()
@@ -558,29 +584,35 @@ class IQAnalyzer(QMainWindow):
             self.fft_canvas.plot_initialized = False
             # Replot with auto-scaling for the current sampling rate
             self.update_fft_with_auto_scale()
+            self.status_bar.showMessage('FFT plot reset to home view with auto-scaling')
         else:
-            # If no data, use the default home function
-            self.fft_toolbar.home_original()
+            # If no data, just clear the plot
+            self.fft_canvas.axes.clear()
+            self.fft_canvas.draw()
+            self.status_bar.showMessage('No data to display')
     
     def custom_home_function(self):
         """Custom home function that properly auto-scales the y-axis for current plot mode"""
+        #print("Executing custom home function for time-domain...")  # Debug print
         if self.iq_data is not None:
             # Clear zoom state to allow full auto-scaling
             self.iq_canvas.current_xlim = None
             self.iq_canvas.current_ylim = None
-            # Replot with auto-scaling for the current plot mode
-            # Pass auto_scale=True to ensure proper handling
-            self.plot_iq_data(auto_scale=True)
+            # Replot with complete reset (this will go to the 'CCC' branch)
+            self.plot_iq_data(reset_zoom=True)
+            self.status_bar.showMessage('Time-domain plot reset to home view with auto-scaling')
         else:
-            # If no data, use the default home function
-            self.iq_toolbar.home_original()
+            # If no data, just clear the plot
+            self.iq_canvas.axes.clear()
+            self.iq_canvas.draw()
+            self.status_bar.showMessage('No data to display')
     
     def update_plot_mode(self):
         """Update the time domain plot mode"""
         self.time_plot_mode = self.plot_mode_combo.currentText()
         if self.iq_data is not None:
-            # Don't clear zoom state - we want to preserve x-axis zoom
-            # Only auto-scale the y-axis when switching plot modes
+            # Preserve x-axis zoom but auto-scale y-axis when switching plot modes
+            # Don't use reset_zoom=True here because we want to preserve x-axis zoom
             self.plot_iq_data(auto_scale=True)
     
     def store_current_zoom(self):
@@ -755,7 +787,7 @@ class IQAnalyzer(QMainWindow):
                 # Reset y-axis lock checkbox
                 self.fix_y_axis_checkbox.setChecked(False)
                 
-                self.plot_iq_data()
+                self.plot_iq_data(reset_zoom=True)
                 self.update_fft()
                 
                 self.status_bar.showMessage(f'Loaded {len(self.iq_data)} IQ samples from {filename}')
@@ -764,13 +796,14 @@ class IQAnalyzer(QMainWindow):
                 QMessageBox.critical(self, "Error", f'Error loading file: {str(e)}')
                 self.status_bar.showMessage(f'Error loading file: {str(e)}')
     
-    def plot_iq_data(self, auto_scale=False):
+    def plot_iq_data(self, auto_scale=False, reset_zoom=False):
         """Plot the IQ data in time domain with FFT region highlighting"""
         if self.iq_data is None:
             return
         
-        # Store current zoom level before clearing
-        self.store_current_zoom()
+        # Store current zoom level before clearing ONLY if we're not resetting
+        if not reset_zoom:
+            self.store_current_zoom()
         
         self.iq_canvas.axes.clear()
         
@@ -838,21 +871,31 @@ class IQAnalyzer(QMainWindow):
             spine.set_color('#555555')
         self.iq_canvas.axes.tick_params(colors='#cccccc')
         
-        # Handle zoom restoration based on auto_scale mode
-        if auto_scale and self.iq_canvas.current_xlim is not None:
+        # Handle zoom restoration based on parameters
+        if reset_zoom:
+            #print('Complete reset to home view')
+            # Complete reset: just autoscale everything
+            self.iq_canvas.axes.autoscale_view()
+            # Special handling for abs(I+Q) mode - set y-axis minimum to 0
+            if self.time_plot_mode == "abs(I+Q)":
+                current_ylim = self.iq_canvas.axes.get_ylim()
+                self.iq_canvas.axes.set_ylim(bottom=0, top=current_ylim[1])
+        elif auto_scale and self.iq_canvas.current_xlim is not None:
+            #print('Auto-scale with x-axis preservation')
             # Auto-scale mode: preserve x-axis zoom, auto-scale y-axis
             self.iq_canvas.axes.autoscale_view()  # Let it autoscale both first
             self.iq_canvas.axes.set_xlim(self.iq_canvas.current_xlim)  # Then restore x-axis
         elif not auto_scale and (self.iq_canvas.current_xlim is not None or self.iq_canvas.current_ylim is not None):
+            #print('Restore previous zoom')
             # Normal mode with existing zoom: let matplotlib autoscale first, then restore both axes
             self.iq_canvas.axes.autoscale_view()
             self.restore_zoom()
         else:
-            # No previous zoom or both zoom states are None: just autoscale everything
+            #print('Default autoscale (no previous zoom)')
+            # No previous zoom: just autoscale everything
             self.iq_canvas.axes.autoscale_view()
             # Special handling for abs(I+Q) mode - set y-axis minimum to 0
             if self.time_plot_mode == "abs(I+Q)":
-                current_xlim = self.iq_canvas.axes.get_xlim()
                 current_ylim = self.iq_canvas.axes.get_ylim()
                 self.iq_canvas.axes.set_ylim(bottom=0, top=current_ylim[1])
         
